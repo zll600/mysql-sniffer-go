@@ -1,29 +1,12 @@
-/*
- * mysql-sniffer.go
- *
- * A straightforward program for sniffing MySQL query streams and providing
- * diagnostic information on the realtime queries your database is handling.
- *
- * FIXME: this assumes IPv4.
- * FIXME: tokenizer doesn't handle negative numbers or floating points.
- * FIXME: canonicalizer should collapse "IN (?,?,?,?)" and "VALUES (?,?,?,?)"
- * FIXME: tokenizer breaks on '"' or similarly embedded quotes
- * FIXME: tokenizer parses numbers in words wrong, i.e. s2compiled -> s?compiled
- *
- * written by Mark Smith <mark@qq.is>
- *
- * requires the gopcap library to be installed from:
- *   https://github.com/akrennmair/gopcap
- *
- */
-
 package main
 
 import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -74,16 +57,16 @@ type sortable struct {
 type sortableSlice []sortable
 
 type source struct {
-	src       string
-	srcip     string
-	synced    bool
-	reqbuffer []byte
-	resbuffer []byte
-	reqSent   *time.Time
-	reqTimes  [TIME_BUCKETS]uint64
-	qbytes    uint64
-	qdata     *queryData
-	qtext     string
+	hostPort   string
+	srcIP      string
+	synced     bool
+	reqBuffer  []byte
+	respBuffer []byte
+	reqSent    *time.Time
+	reqTimes   [TIME_BUCKETS]uint64
+	qBytes     uint64
+	qData      *queryData
+	qText      string
 }
 
 type queryData struct {
@@ -94,11 +77,12 @@ type queryData struct {
 
 var start int64 = UnixNow()
 var qbuf map[string]*queryData = make(map[string]*queryData)
-var querycount int
+var queryCount int
 var chmap map[string]*source = make(map[string]*source)
 var verbose bool = false
 var noclean bool = false
 var dirty bool = false
+var showRows bool = false
 var format []interface{}
 var port uint16
 var times [TIME_BUCKETS]uint64
@@ -117,26 +101,28 @@ func UnixNow() int64 {
 }
 
 func main() {
-	var lport *int = flag.Int("P", 3306, "MySQL port to use")
-	var eth *string = flag.String("i", "eth0", "Interface to sniff")
-	var ldirty *bool = flag.Bool("u", false, "Unsanitized -- do not canonicalize queries")
-	var period *int = flag.Int("t", 10, "Seconds between outputting status")
-	var displaycount *int = flag.Int("d", 15, "Display this many queries in status updates")
-	var doverbose *bool = flag.Bool("v", false, "Print every query received (spammy)")
-	var nocleanquery *bool = flag.Bool("n", false, "no clean queries")
-	var formatstr *string = flag.String("f", "#s:#q", "Format for output aggregation")
-	var sortby *string = flag.String("s", "count", "Sort by: count, max, avg, maxbytes, avgbytes")
-	var cutoff *int = flag.Int("c", 0, "Only show queries over count/second")
+	var lport = flag.Int("P", 3306, "MySQL port to use")
+	var eth = flag.String("i", "eth0", "Interface to sniff")
+	var ldirty = flag.Bool("u", false, "Unsanitized -- do not canonicalize queries")
+	var period = flag.Int("t", 10, "Seconds between outputting status")
+	var displaycount = flag.Int("d", 15, "Display this many queries in status updates")
+	var doverbose = flag.Bool("v", false, "Print every query received (spammy)")
+	var nocleanquery = flag.Bool("n", false, "no clean queries")
+	var formatstr = flag.String("f", "#s:#q", "Format for output aggregation")
+	var sortby = flag.String("s", "count", "Sort by: count, max, avg, maxbytes, avgbytes")
+	var cutoff = flag.Int("c", 0, "Only show queries over count/second")
+	var doshowrows = flag.Bool("r", false, "Show all result set rows (use with -v)")
 	flag.Parse()
 
 	verbose = *doverbose
 	noclean = *nocleanquery
+	showRows = *doshowrows
 	port = uint16(*lport)
 	dirty = *ldirty
 	parseFormat(*formatstr)
 
 	log.Printf("Initializing MySQL sniffing on %s:%d...", *eth, port)
-	handle, err := pcap.OpenLive(*eth, 1024, false, pcap.BlockForever)
+	handle, err := pcap.OpenLive(*eth, 1024*1024, false, pcap.BlockForever)
 	if err != nil {
 		log.Fatalf("Failed to open device: %s", err.Error())
 	}
@@ -147,9 +133,8 @@ func main() {
 		log.Fatalf("Failed to set port filter: %s", err.Error())
 	}
 
-	// Create packet source
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	last := UnixNow()
+	last := time.Now().Unix()
 
 	for packet := range packetSource.Packets() {
 		handlePacket(packet)
@@ -157,11 +142,237 @@ func main() {
 		// simple output printer... this should be super fast since we expect that a
 		// system like this will have relatively few unique queries once they're
 		// canonicalized.
-		if !verbose && querycount%1000 == 0 && last < UnixNow()-int64(*period) {
+		if !verbose && queryCount%1000 == 0 && last < UnixNow()-int64(*period) {
 			last = UnixNow()
 			handleStatusUpdate(*displaycount, *sortby, *cutoff)
 		}
 	}
+}
+
+// extract the data using structured packet parsing with gopacket
+func handlePacket(packet gopacket.Packet) {
+	// Parse network layer to get IP addresses
+	networkLayer := packet.NetworkLayer()
+	if networkLayer == nil {
+		return
+	}
+
+	// Parse transport layer to get TCP ports
+	tcpLayer := packet.Layer(layers.LayerTypeTCP)
+	if tcpLayer == nil {
+		return
+	}
+	tcp, _ := tcpLayer.(*layers.TCP)
+
+	// Get IP layer for addresses
+	var srcIP, dstIP string
+	if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
+		ipv4, _ := ipv4Layer.(*layers.IPv4)
+		srcIP = ipv4.SrcIP.String()
+		dstIP = ipv4.DstIP.String()
+	} else {
+		// TODO: Add IPv6 support
+		return
+	}
+
+	// Extract ports
+	srcPort := uint16(tcp.SrcPort)
+	dstPort := uint16(tcp.DstPort)
+
+	// Get application layer payload
+	applicationLayer := packet.ApplicationLayer()
+	if applicationLayer == nil {
+		return
+	}
+	payload := applicationLayer.Payload()
+
+	// If this is a 0-length payload, do nothing.
+	if len(payload) <= 0 {
+		return
+	}
+
+	// This is either an inbound or outbound packet. Determine by seeing which
+	// end contains our port. Either way, we want to put this on the channel of
+	// the remote end.
+	var src string
+	request := false
+	if srcPort == port {
+		src = fmt.Sprintf("%s:%d", dstIP, dstPort)
+		slog.Info("response", "src", src)
+	} else if dstPort == port {
+		src = fmt.Sprintf("%s:%d", srcIP, srcPort)
+		request = true
+		slog.Info("request", "src", src)
+	} else {
+		slog.Error("got unexpected packet", "srcPort", srcPort, "dstPort", dstPort)
+		os.Exit(1)
+	}
+
+	// Get the data structure for this source, then do something.
+	rs, ok := chmap[src]
+	if !ok {
+		srcIP := src[0:strings.Index(src, ":")]
+		rs = &source{hostPort: src, srcIP: srcIP, synced: false}
+		stats.streams++
+		chmap[src] = rs
+	}
+
+	// Now with a source, process the packet.
+	processPacket(rs, request, payload)
+}
+
+// processPacket dispatches packet processing to request or response handler
+func processPacket(rs *source, request bool, data []byte) {
+	stats.packets.rcvd++
+	if rs.synced {
+		stats.packets.rcvd_sync++
+	}
+
+	if request {
+		processRequest(rs, data)
+	} else {
+		processResponse(rs, data)
+	}
+}
+
+// processRequest handles MySQL request packets (queries from client to server)
+func processRequest(rs *source, data []byte) {
+	slog.Info("receive request", "hostPort", rs.hostPort, "dataLength", len(data))
+
+	// If we still have response buffer, we're in some weird state and
+	// didn't successfully process the response.
+	if rs.respBuffer != nil {
+		stats.desyncs++
+		rs.respBuffer = nil
+		rs.synced = false
+	}
+
+	rs.reqBuffer = data
+	pType, pData := carvePacket(&rs.reqBuffer)
+
+	// The synchronization logic: if we're not synced, we wait for a COM_QUERY
+	if !rs.synced {
+		if pType != COM_QUERY {
+			rs.reqBuffer, rs.respBuffer = nil, nil
+			return
+		}
+		rs.synced = true
+	}
+
+	// No (full) packet detected yet
+	if pType == -1 {
+		return
+	}
+
+	// Record request timestamp
+	tnow := time.Now()
+	// FIXME: why use pointer here
+	rs.reqSent = &tnow
+
+	// Increment query counter
+	queryCount++
+
+	// Format the query text according to user preferences
+	text := formatQueryText(rs, pData)
+
+	// Update query statistics
+	plen := uint64(len(pData))
+	qdata, ok := qbuf[text]
+	if !ok {
+		qdata = &queryData{}
+		qbuf[text] = qdata
+	}
+	qdata.count++
+	qdata.bytes += plen
+	rs.qText, rs.qData, rs.qBytes = text, qdata, plen
+}
+
+// processResponse handles MySQL response packets (results from server to client)
+func processResponse(rs *source, data []byte) {
+	// Accumulate response data
+	if rs.respBuffer == nil {
+		rs.respBuffer = data
+	} else {
+		rs.respBuffer = append(rs.respBuffer, data...)
+	}
+
+	// If we haven't sent a request, we're still accumulating data
+	if rs.reqSent == nil {
+		if rs.qData != nil {
+			rs.qData.bytes += uint64(len(data))
+		}
+		return
+	}
+
+	// Calculate request-response time
+	reqtime := uint64(time.Since(*rs.reqSent).Nanoseconds())
+
+	// Update timing statistics (per-source, global, and per-query)
+	randn := rand.Intn(TIME_BUCKETS)
+	rs.reqTimes[randn] = reqtime
+	times[randn] = reqtime
+	if rs.qData != nil {
+		rs.qData.times[randn] = reqtime
+		rs.qData.bytes += uint64(len(data))
+	}
+
+	// Clear request timestamp
+	rs.reqSent = nil
+
+	// Display parsed query and result in verbose mode
+	if verbose && len(rs.qText) > 0 {
+		displayQueryResult(rs.hostPort, rs.qText, rs.respBuffer, reqtime, rs.qBytes, showRows)
+	}
+
+	// Clear response buffer after processing
+	rs.respBuffer = nil
+}
+
+// formatQueryText formats the query according to the user's format string
+func formatQueryText(rs *source, pdata []byte) string {
+	var text string
+
+	for _, item := range format {
+		switch item.(type) {
+		case int:
+			switch item.(int) {
+			case F_NONE:
+				log.Fatalf("F_NONE in format string")
+			case F_QUERY:
+				if dirty {
+					text += string(pdata)
+				} else {
+					text += cleanupQuery(pdata)
+				}
+			case F_ROUTE:
+				// Routes are in the query like:
+				//     SELECT /* hostname:route */ FROM ...
+				// We remove the hostname so routes can be condensed.
+				parts := strings.SplitN(string(pdata), " ", 5)
+				if len(parts) >= 4 && parts[1] == "/*" && parts[3] == "*/" {
+					if strings.Contains(parts[2], ":") {
+						text += strings.SplitN(parts[2], ":", 2)[1]
+					} else {
+						text += parts[2]
+					}
+				} else {
+					text += "(unknown) " + cleanupQuery(pdata)
+				}
+			case F_SOURCE:
+				text += rs.hostPort
+			case F_SOURCEIP:
+				text += rs.srcIP
+			default:
+				log.Fatalf("Unknown F_XXXXXX int in format string")
+			}
+		case string:
+			text += item.(string)
+		default:
+			log.Fatalf("Unknown type in format string")
+		}
+	}
+
+	return text
 }
 
 func calculateTimes(timings *[TIME_BUCKETS]uint64) (fmin, favg, fmax float64) {
@@ -196,8 +407,8 @@ func handleStatusUpdate(displaycount int, sortby string, cutoff int) {
 	// print status bar
 	log.Printf("\n")
 	log.SetFlags(log.Ldate | log.Ltime)
-	log.Printf("%s%d total queries, %0.2f per second%s", COLOR_RED, querycount,
-		float64(querycount)/elapsed, COLOR_DEFAULT)
+	log.Printf("%s%d total queries, %0.2f per second%s", COLOR_RED, queryCount,
+		float64(queryCount)/elapsed, COLOR_DEFAULT)
 	log.SetFlags(0)
 
 	log.Printf("%d packets (%0.2f%% on synchronized streams) / %d desyncs / %d streams",
@@ -251,170 +462,27 @@ func handleStatusUpdate(displaycount int, sortby string, cutoff int) {
 	}
 }
 
-// Do something with a packet for a source.
-func processPacket(rs *source, request bool, data []byte) {
-	//		log.Printf("[%s] request=%t, got %d bytes", rs.src, request,
-	//			len(data))
-
-	stats.packets.rcvd++
-	if rs.synced {
-		stats.packets.rcvd_sync++
-	}
-
-	var ptype int = -1
-	var pdata []byte
-
-	if request {
-		// If we still have response buffer, we're in some weird state and
-		// didn't successfully process the response.
-		if rs.resbuffer != nil {
-			//				log.Printf("[%s] possibly pipelined request? %d bytes",
-			//					rs.src, len(rs.resbuffer))
-			stats.desyncs++
-			rs.resbuffer = nil
-			rs.synced = false
-		}
-		rs.reqbuffer = data
-		ptype, pdata = carvePacket(&rs.reqbuffer)
-	} else {
-		// FIXME: For now we're not doing anything with response data, just using the first packet
-		// after a query to determine latency.
-		rs.resbuffer = nil
-		ptype, pdata = 0, data
-	}
-
-	// The synchronization logic: if we're not presently, then we want to
-	// keep going until we are capable of carving off of a request/query.
-	if !rs.synced {
-		if !(request && ptype == COM_QUERY) {
-			rs.reqbuffer, rs.resbuffer = nil, nil
-			return
-		}
-		rs.synced = true
-	}
-	//log.Printf("[%s] request=%b ptype=%d plen=%d", rs.src, request, ptype, len(pdata))
-
-	// No (full) packet detected yet. Continue on our way.
-	if ptype == -1 {
-		return
-	}
-	plen := uint64(len(pdata))
-
-	// If this is a response then we want to record the timing and
-	// store it with this channel so we can keep track of that.
-	var reqtime uint64
-	if !request {
-		// Keep adding the bytes we're getting, since this is probably still part of
-		// an earlier response
-		if rs.reqSent == nil {
-			if rs.qdata != nil {
-				rs.qdata.bytes += plen
-			}
-			return
-		}
-		reqtime = uint64(time.Since(*rs.reqSent).Nanoseconds())
-
-		// We keep track of per-source, global, and per-query timings.
-		randn := rand.Intn(TIME_BUCKETS)
-		rs.reqTimes[randn] = reqtime
-		times[randn] = reqtime
-		if rs.qdata != nil {
-			// This should never fail but it has. Probably because of a
-			// race condition I need to suss out, or sharing between
-			// two different goroutines. :(
-			rs.qdata.times[randn] = reqtime
-			rs.qdata.bytes += plen
-		}
-		rs.reqSent = nil
-
-		// If we're in verbose mode, just dump statistics from this one.
-		if verbose && len(rs.qtext) > 0 {
-			log.Printf("    %s%s %s## %sbytes: %d time: %0.2f%s\n", COLOR_GREEN, rs.qtext, COLOR_RED,
-				COLOR_YELLOW, rs.qbytes, float64(reqtime)/1000000, COLOR_DEFAULT)
-		}
-
-		return
-	}
-
-	// This is for sure a request, so let's count it as one.
-	if rs.reqSent != nil {
-		//			log.Printf("[%s] ...sending two requests without a response?",
-		//				rs.src)
-	}
-	tnow := time.Now()
-	rs.reqSent = &tnow
-
-	// Convert this request into whatever format the user wants.
-	querycount++
-	var text string
-
-	for _, item := range format {
-		switch item.(type) {
-		case int:
-			switch item.(int) {
-			case F_NONE:
-				log.Fatalf("F_NONE in format string")
-			case F_QUERY:
-				if dirty {
-					text += string(pdata)
-				} else {
-					text += cleanupQuery(pdata)
-				}
-			case F_ROUTE:
-				// Routes are in the query like:
-				//     SELECT /* hostname:route */ FROM ...
-				// We remove the hostname so routes can be condensed.
-				parts := strings.SplitN(string(pdata), " ", 5)
-				if len(parts) >= 4 && parts[1] == "/*" && parts[3] == "*/" {
-					if strings.Contains(parts[2], ":") {
-						text += strings.SplitN(parts[2], ":", 2)[1]
-					} else {
-						text += parts[2]
-					}
-				} else {
-					text += "(unknown) " + cleanupQuery(pdata)
-				}
-			case F_SOURCE:
-				text += rs.src
-			case F_SOURCEIP:
-				text += rs.srcip
-			default:
-				log.Fatalf("Unknown F_XXXXXX int in format string")
-			}
-		case string:
-			text += item.(string)
-		default:
-			log.Fatalf("Unknown type in format string")
-		}
-	}
-	qdata, ok := qbuf[text]
-	if !ok {
-		qdata = &queryData{}
-		qbuf[text] = qdata
-	}
-	qdata.count++
-	qdata.bytes += plen
-	rs.qtext, rs.qdata, rs.qbytes = text, qdata, plen
-}
-
 // carvePacket tries to pull a packet out of a slice of bytes. If so, it removes
 // those bytes from the slice.
 func carvePacket(buf *[]byte) (int, []byte) {
-	datalen := uint32(len(*buf))
-	if datalen < 5 {
+	dataLen := uint32(len(*buf))
+	// TODO: 5 is a magical number here
+	if dataLen < 5 {
 		return -1, nil
 	}
 
+	// TODO: figure out the parse here, maybe we need a mysql protocol format here
 	size := uint32((*buf)[0]) + uint32((*buf)[1])<<8 + uint32((*buf)[2])<<16
-	if size == 0 || datalen < size+4 {
+	// TODO: maybe should be dataLen != size+4
+	if size == 0 || dataLen < size+4 {
 		return -1, nil
 	}
 
 	// Else, has some length, try to validate it.
 	end := size + 4
-	ptype := int((*buf)[4])
+	pType := int((*buf)[4])
 	data := (*buf)[5 : size+4]
-	if end >= datalen {
+	if end >= dataLen {
 		*buf = nil
 	} else {
 		*buf = (*buf)[end:]
@@ -422,79 +490,9 @@ func carvePacket(buf *[]byte) (int, []byte) {
 
 	//	log.Printf("datalen=%d size=%d end=%d ptype=%d data=%d buf=%d",
 	//		datalen, size, end, ptype, len(data), len(*buf))
+	slog.Info("carved Packet", "dataLen", dataLen, "size", size, "end", end, "pType", pType, "data", data, "buf", buf)
 
-	return ptype, data
-}
-
-// extract the data using structured packet parsing with gopacket
-func handlePacket(packet gopacket.Packet) {
-	// Parse network layer to get IP addresses
-	networkLayer := packet.NetworkLayer()
-	if networkLayer == nil {
-		return
-	}
-
-	// Parse transport layer to get TCP ports
-	tcpLayer := packet.Layer(layers.LayerTypeTCP)
-	if tcpLayer == nil {
-		return
-	}
-	tcp, _ := tcpLayer.(*layers.TCP)
-
-	// Get IP layer for addresses
-	var srcIP, dstIP string
-	if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
-		ipv4, _ := ipv4Layer.(*layers.IPv4)
-		srcIP = ipv4.SrcIP.String()
-		dstIP = ipv4.DstIP.String()
-	} else {
-		// TODO: Add IPv6 support (removes FIXME from line 7)
-		return
-	}
-
-	// Extract ports
-	srcPort := uint16(tcp.SrcPort)
-	dstPort := uint16(tcp.DstPort)
-
-	// Get application layer payload
-	applicationLayer := packet.ApplicationLayer()
-	if applicationLayer == nil {
-		return
-	}
-	payload := applicationLayer.Payload()
-
-	// If this is a 0-length payload, do nothing.
-	if len(payload) <= 0 {
-		return
-	}
-
-	// This is either an inbound or outbound packet. Determine by seeing which
-	// end contains our port. Either way, we want to put this on the channel of
-	// the remote end.
-	var src string
-	var request bool = false
-	if srcPort == port {
-		src = fmt.Sprintf("%s:%d", dstIP, dstPort)
-		//log.Printf("response to %s", src)
-	} else if dstPort == port {
-		src = fmt.Sprintf("%s:%d", srcIP, srcPort)
-		request = true
-		//log.Printf("request from %s", src)
-	} else {
-		log.Fatalf("got packet src = %d, dst = %d", srcPort, dstPort)
-	}
-
-	// Get the data structure for this source, then do something.
-	rs, ok := chmap[src]
-	if !ok {
-		srcip := src[0:strings.Index(src, ":")]
-		rs = &source{src: src, srcip: srcip, synced: false}
-		stats.streams++
-		chmap[src] = rs
-	}
-
-	// Now with a source, process the packet.
-	processPacket(rs, request, payload)
+	return pType, data
 }
 
 // scans forward in the query given the current type and returns when we encounter
@@ -610,7 +608,7 @@ func cleanupQuery(query []byte) string {
 		}
 	}
 
-	return strings.Replace(tmp, "?, ", "", -1)
+	return strings.ReplaceAll(tmp, "?, ", "")
 }
 
 // parseFormat takes a string and parses it out into the given format slice

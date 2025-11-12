@@ -4,26 +4,11 @@
     "go.lintTool": "golangci-lint",
     "go.lintOnSave": "workspace",
     "go.formatTool": "gofmt",
-    "go.formatOnSave": true,
-
-    // Build and test settings
-    "go.buildOnSave": "workspace",
-    "go.testOnSave": false,
-    "go.coverOnSave": false,
-
     // Debugging settings
     "go.delveConfig": {
-        "dlvLoadConfig": {
-            "followPointers": true,
-            "maxVariableRecurse": 1,
-            "maxStringLen": 512,
-            "maxArrayValues": 64,
-            "maxStructFields": -1
-        },
         "apiVersion": 2,
         "showGlobalVariables": true
     },
-
     // Editor settings for Go
     "editor.formatOnSave": true,
     "[go]": {
@@ -32,7 +17,6 @@
             "source.organizeImports": "explicit"
         }
     },
-
     // Workspace specific
     "files.exclude": {
         "**/.git": true,

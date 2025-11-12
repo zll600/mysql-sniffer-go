@@ -1,5 +1,6 @@
 {
     "version": "0.2.0",
+    // See: https://github.com/golang/vscode-go/blob/master/docs/debugging.md#configuration
     "configurations": [
         {
             "name": "Debug mysql-sniffer (lo0)",
@@ -8,14 +9,15 @@
             "mode": "debug",
             "program": "${workspaceFolder}/mysql-sniffer.go",
             "args": [
-                "-i", "lo0",
-                "-P", "3306",
+                "-i",
+                "lo0",
+                "-P",
+                "3306",
                 "-v"
             ],
             "env": {},
             "showLog": true,
             "asRoot": true,
-            "buildFlags": "-gcflags=all=-N -l",
             "preLaunchTask": "go: clean build cache"
         },
         {
@@ -25,13 +27,14 @@
             "mode": "debug",
             "program": "${workspaceFolder}/mysql-sniffer.go",
             "args": [
-                "-i", "lo0",
-                "-P", "3306"
+                "-i",
+                "lo0",
+                "-P",
+                "3306"
             ],
             "env": {},
             "showLog": true,
             "asRoot": true,
-            "buildFlags": "-gcflags=all=-N -l",
             "preLaunchTask": "go: clean build cache"
         },
         {
@@ -41,14 +44,15 @@
             "mode": "debug",
             "program": "${workspaceFolder}/mysql-sniffer.go",
             "args": [
-                "-i", "eth0",
-                "-P", "3306",
+                "-i",
+                "eth0",
+                "-P",
+                "3306",
                 "-v"
             ],
             "env": {},
             "showLog": true,
             "asRoot": true,
-            "buildFlags": "-gcflags=all=-N -l",
             "preLaunchTask": "go: clean build cache"
         },
         {
