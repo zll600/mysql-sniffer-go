@@ -244,7 +244,7 @@ func TestParseFormat(t *testing.T) {
 		{
 			name:     "default empty",
 			input:    "",
-			expected: []interface{}{F_SOURCEIP, ":", F_QUERY},
+			expected: []any{F_SOURCEIP, ":", F_QUERY},
 		},
 	}
 
@@ -270,36 +270,36 @@ func TestCarvePacket(t *testing.T) {
 		wantDataLen int
 		wantBufLen  int
 	}{
-		// {
-		// 	name:        "empty buffer",
-		// 	input:       []byte{},
-		// 	wantPtype:   -1,
-		// 	wantDataLen: 0,
-		// 	wantBufLen:  0,
-		// },
-		// {
-		// 	name:        "buffer too small",
-		// 	input:       []byte{0x01, 0x00, 0x00},
-		// 	wantPtype:   -1,
-		// 	wantDataLen: 0,
-		// 	wantBufLen:  3,
-		// },
+		{
+			name:        "empty buffer",
+			input:       []byte{},
+			wantPtype:   -1,
+			wantDataLen: 0,
+			wantBufLen:  0,
+		},
+		{
+			name:        "buffer too small",
+			input:       []byte{0x01, 0x00, 0x00},
+			wantPtype:   -1,
+			wantDataLen: 0,
+			wantBufLen:  3,
+		},
 		{
 			name: "valid query packet",
-			// Packet: size=5 (0x05, 0x00, 0x00), seq=0, type=3 (COM_QUERY), data="hello"
-			input:       []byte{0x05, 0x00, 0x00, 0x00, 0x03, 'h', 'e', 'l', 'l', 'o'},
+			// Packet: size=6 (0x06, 0x00, 0x00), seq=0, type=3 (COM_QUERY), data="hello"
+			input:       []byte{0x06, 0x00, 0x00, 0x00, 0x03, 'h', 'e', 'l', 'l', 'o'},
 			wantPtype:   COM_QUERY,
 			wantDataLen: 5,
 			wantBufLen:  0, // buffer should be consumed
 		},
-		// {
-		// 	name: "valid packet with remaining data",
-		// 	// First packet + extra bytes
-		// 	input:       []byte{0x03, 0x00, 0x00, 0x00, 0x03, 'f', 'o', 'o', 0xFF, 0xFF},
-		// 	wantPtype:   COM_QUERY,
-		// 	wantDataLen: 3,
-		// 	wantBufLen:  2, // remaining bytes
-		// },
+		{
+			name: "valid packet with remaining data",
+			// First packet + extra bytes
+			input:       []byte{0x04, 0x00, 0x00, 0x00, 0x03, 'f', 'o', 'o', 0xFF, 0xFF},
+			wantPtype:   COM_QUERY,
+			wantDataLen: 3,
+			wantBufLen:  2, // remaining bytes
+		},
 	}
 
 	for _, tt := range tests {

@@ -472,8 +472,11 @@ func carvePacket(buf *[]byte) (int, []byte) {
 	}
 
 	// TODO: figure out the parse here, maybe we need a mysql protocol format here
+	// first three bytes
 	size := uint32((*buf)[0]) + uint32((*buf)[1])<<8 + uint32((*buf)[2])<<16
 	// TODO: maybe should be dataLen != size+4
+	// three bytes: size of command
+	// one byte: the command type
 	if size == 0 || dataLen < size+4 {
 		return -1, nil
 	}
