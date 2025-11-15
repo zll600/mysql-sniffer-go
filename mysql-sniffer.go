@@ -620,7 +620,15 @@ func cleanupQuery(query []byte) string {
 		}
 	}
 
-	return strings.ReplaceAll(tmp, "?, ", "")
+	// Remove all commas (replace ", " with " ")
+	tmp = strings.ReplaceAll(tmp, ", ", " ")
+
+	// Collapse multiple ? in lists like IN clauses: "? ? ?" -> "?"
+	for strings.Contains(tmp, "? ?") {
+		tmp = strings.ReplaceAll(tmp, "? ?", "?")
+	}
+
+	return tmp
 }
 
 // parseFormat takes a string and parses it out into the given format slice
@@ -629,7 +637,7 @@ func cleanupQuery(query []byte) string {
 func parseFormat(formatstr string) {
 	formatstr = strings.TrimSpace(formatstr)
 	if formatstr == "" {
-		formatstr = "#b:#k"
+		formatstr = "#i:#q"
 	}
 
 	is_special := false

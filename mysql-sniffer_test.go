@@ -10,9 +10,8 @@ import (
 // ========== cleanupQuery Tests ==========
 
 func cleanupHelper(t *testing.T, input, expected string) {
-	var iv []byte = []byte(input)
-	var out string = cleanupQuery(iv)
-	if out != expected {
+	iv := []byte(input)
+	if out := cleanupQuery(iv); out != expected {
 		t.Errorf("For query %s\n    Got %s\n    Expected %s", input, out, expected)
 	}
 }
