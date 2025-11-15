@@ -271,8 +271,8 @@ func collectAllResponsePackets(buffer []byte) [][]byte {
 			break
 		}
 
-		// Extract packet data (skip 4-byte header)
-		packetData := buf[5 : size+4]
+		// Extract packet data (skip 4-byte header: 3 bytes size + 1 byte sequence)
+		packetData := buf[4 : size+4]
 		packets = append(packets, packetData)
 
 		// Move to next packet
