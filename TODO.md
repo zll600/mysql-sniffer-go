@@ -7,3 +7,5 @@
 7. [ ] Support Unix Socket
 8. [ ] Support Tcp Socket
 9. [ ] Add Status Update
+10. [ ] Connection Phase: to get more information about current connection
+11. [ ] Command Phase
