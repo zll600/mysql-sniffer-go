@@ -307,6 +307,20 @@ func TestCarvePacket(t *testing.T) {
 			wantDataLen: 3,
 			wantBufLen:  2, // remaining bytes
 		},
+		{
+			name: "MySQL 8.0.23+ packet with query attributes",
+			// Real packet: #\x00\x00\x00\x03\x00\x01select * from users where id = 1
+			// Header: 0x23(35), 0x00, 0x00 (payload length) + 0x00 (sequence)
+			// Payload: 0x03 (COM_QUERY) + 0x00 0x01 (query attributes) + query text
+			input: append(
+				[]byte{0x23, 0x00, 0x00, 0x00, 0x03}, // header + command
+				append([]byte{0x00, 0x01}, []byte("select * from users where id = 1")...)..., // query attributes + query
+			),
+			wantErr:     false,
+			wantPtype:   CommandType(mysql.COM_QUERY),
+			wantDataLen: 34, // 2 bytes query attributes + 32 bytes query text
+			wantBufLen:  0,  // buffer should be consumed
+		},
 	}
 
 	for _, tt := range tests {
@@ -445,5 +459,102 @@ func TestSortableSliceSwap(t *testing.T) {
 	}
 	if s[1].value != 1.0 || s[1].line != "a" {
 		t.Errorf("After swap, s[1] = {%f, %s}, want {1.0, a}", s[1].value, s[1].line)
+	}
+}
+
+// ========== parseComQuery Tests ==========
+
+func TestParseComQuery(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     []byte
+		wantQuery string
+		wantErr   bool
+	}{
+		{
+			name:      "empty data",
+			input:     []byte{},
+			wantQuery: "",
+			wantErr:   true,
+		},
+		{
+			name:      "legacy format - simple SELECT",
+			input:     []byte("select * from users"),
+			wantQuery: "select * from users",
+			wantErr:   false,
+		},
+		{
+			name:      "legacy format - SELECT with number",
+			input:     []byte("select * from users where id = 1"),
+			wantQuery: "select * from users where id = 1",
+			wantErr:   false,
+		},
+		{
+			name:      "legacy format - INSERT",
+			input:     []byte("insert into users values (1, 'john')"),
+			wantQuery: "insert into users values (1, 'john')",
+			wantErr:   false,
+		},
+		{
+			name: "MySQL 8.0.23+ format - parameter_count=0, parameter_set_count=1",
+			// Real packet from user: \x00\x01select * from users where id = 1
+			input:     []byte{0x00, 0x01, 's', 'e', 'l', 'e', 'c', 't', ' ', '*', ' ', 'f', 'r', 'o', 'm', ' ', 'u', 's', 'e', 'r', 's', ' ', 'w', 'h', 'e', 'r', 'e', ' ', 'i', 'd', ' ', '=', ' ', '1'},
+			wantQuery: "select * from users where id = 1",
+			wantErr:   false,
+		},
+		{
+			name: "MySQL 8.0.23+ format - parameter_count=0, parameter_set_count=1 (bytes)",
+			// Using bytes literal for clarity
+			input:     append([]byte{0x00, 0x01}, []byte("select * from users where id = 1")...),
+			wantQuery: "select * from users where id = 1",
+			wantErr:   false,
+		},
+		{
+			name: "MySQL 8.0.23+ format - different query",
+			input:     append([]byte{0x00, 0x01}, []byte("UPDATE users SET name='alice' WHERE id=1")...),
+			wantQuery: "UPDATE users SET name='alice' WHERE id=1",
+			wantErr:   false,
+		},
+		{
+			name: "MySQL 8.0.23+ format - parameter_count=0, parameter_set_count=2",
+			input:     append([]byte{0x00, 0x02}, []byte("select 1")...),
+			wantQuery: "select 1",
+			wantErr:   false,
+		},
+		{
+			name:      "MySQL 8.0.23+ format - incomplete (only parameter_count)",
+			input:     []byte{0x00},
+			wantQuery: "",
+			wantErr:   true,
+		},
+		{
+			name:      "MySQL 8.0.23+ format - incomplete (no query text)",
+			input:     []byte{0x00, 0x01},
+			wantQuery: "",
+			wantErr:   true,
+		},
+		{
+			name: "MySQL 8.0.23+ format - with parameters (not supported)",
+			input:     append([]byte{0x01, 0x01}, []byte("select ?")...),
+			wantQuery: "",
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			query, err := parseComQuery(tt.input)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseComQuery() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr {
+				if string(query) != tt.wantQuery {
+					t.Errorf("parseComQuery() query = %q, want %q", string(query), tt.wantQuery)
+				}
+			}
+		})
 	}
 }

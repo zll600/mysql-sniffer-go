@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -320,5 +320,5 @@ func displayQueryResult(src string, query string, responseData []byte, reqTime u
 		output.WriteString(fmt.Sprintf("  %sResult:%s %s\n", COLOR_YELLOW, COLOR_DEFAULT, result))
 	}
 
-	log.Print(output.String())
+	slog.Info(output.String())
 }

@@ -345,6 +345,21 @@ func processRequest(rs *source, data []byte) {
 		rs.synced = true
 	}
 
+	// Parse COM_QUERY data to extract actual SQL query text
+	// This handles both legacy format and MySQL 8.0.23+ query attributes
+	var parsedQuery []byte
+	if pType == CommandType(mysql.COM_QUERY) {
+		var err error
+		parsedQuery, err = parseComQuery(pData)
+		if err != nil {
+			slog.Debug("failed to parse COM_QUERY", "error", err)
+			return
+		}
+	} else {
+		// For non-COM_QUERY commands, use data as-is
+		parsedQuery = pData
+	}
+
 	// Record request timestamp
 	tnow := time.Now()
 	// FIXME: why use pointer here
@@ -354,7 +369,7 @@ func processRequest(rs *source, data []byte) {
 	queryCount++
 
 	// Format the query text according to user preferences
-	text := formatQueryText(rs, pData)
+	text := formatQueryText(rs, parsedQuery)
 
 	// Update query statistics
 	plen := uint64(len(pData))
@@ -580,6 +595,67 @@ func carvePacket(buf *[]byte) (CommandType, []byte, error) {
 	slog.Info("carved Packet", "dataLen", dataLen, "size", size, "end", end, "pType", pType.String(), "dataLen", len(data), "bufRemaining", len(*buf))
 
 	return pType, data, nil
+}
+
+// parseComQuery parses COM_QUERY packet data, handling both legacy format and
+// MySQL 8.0.23+ format with query attributes
+// Input: raw data after the COM_QUERY command byte (0x03)
+// Returns: the actual SQL query text
+func parseComQuery(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty COM_QUERY data")
+	}
+
+	// Detect format: MySQL 8.0.23+ query attributes start with length-encoded integers
+	// SQL queries typically start with printable ASCII (S, s, I, i, U, u, D, d, etc.)
+	// Length-encoded ints for small counts (0-250) will be bytes < 0xfb
+	// If first byte is a common SQL keyword start letter, it's likely legacy format
+	firstByte := data[0]
+
+	// Heuristic: if first byte looks like it could be a length-encoded int (< 0x20 or in 0xfb-0xfe range),
+	// try parsing as MySQL 8.0.23+ format
+	// Common SQL starts: S(0x53), s(0x73), I(0x49), i(0x69), U(0x55), u(0x75), D(0x44), d(0x64), etc.
+	if firstByte < 0x20 || firstByte >= 0xfb {
+		// Likely MySQL 8.0.23+ format with query attributes
+		offset := 0
+
+		// Read parameter_count using go-mysql library function
+		paramCount, isNull, bytesRead := mysql.LengthEncodedInt(data[offset:])
+		if isNull || bytesRead == 0 {
+			// If we can't parse as length-encoded int, treat as legacy format
+			slog.Debug("failed to parse parameter_count, treating as legacy format", "isNull", isNull, "bytesRead", bytesRead)
+			return data, nil
+		}
+		offset += bytesRead
+		slog.Debug("parsed COM_QUERY", "parameter_count", paramCount, "bytesRead", bytesRead)
+
+		// Read parameter_set_count
+		if offset >= len(data) {
+			return nil, errors.New("incomplete COM_QUERY: missing parameter_set_count")
+		}
+		paramSetCount, isNull, bytesRead := mysql.LengthEncodedInt(data[offset:])
+		if isNull {
+			return nil, errors.New("parameter_set_count is NULL")
+		}
+		offset += bytesRead
+		slog.Debug("parsed COM_QUERY", "parameter_set_count", paramSetCount)
+
+		// If there are parameters, we need to skip them
+		// This is complex and involves parsing parameter types, names, and values
+		// For now, we assume parameter_count = 0 (which is common for most queries)
+		if paramCount > 0 {
+			return nil, fmt.Errorf("COM_QUERY with parameters (parameter_count=%d) not yet supported", paramCount)
+		}
+
+		// The rest is the query text
+		if offset >= len(data) {
+			return nil, errors.New("incomplete COM_QUERY: missing query text")
+		}
+		return data[offset:], nil
+	}
+
+	// Legacy format: entire data is the query text
+	return data, nil
 }
 
 // scans forward in the query given the current type and returns when we encounter

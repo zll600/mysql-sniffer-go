@@ -7,13 +7,14 @@
             "type": "go",
             "request": "launch",
             "mode": "debug",
-            "program": "${workspaceFolder}/mysql-sniffer.go",
+            "program": "${workspaceFolder}",
             "args": [
                 "-i",
                 "lo0",
                 "-P",
                 "3306",
-                "-v"
+                "-v",
+                "-r"
             ],
             "env": {},
             "showLog": true,
