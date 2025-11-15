@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"github.com/go-mysql-org/go-mysql/mysql"
 )
 
 // ========== cleanupQuery Tests ==========
@@ -266,21 +268,24 @@ func TestCarvePacket(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       []byte
-		wantPtype   int
+		wantErr     bool
+		wantPtype   CommandType
 		wantDataLen int
 		wantBufLen  int
 	}{
 		{
 			name:        "empty buffer",
 			input:       []byte{},
-			wantPtype:   -1,
+			wantErr:     true,
+			wantPtype:   0,
 			wantDataLen: 0,
 			wantBufLen:  0,
 		},
 		{
 			name:        "buffer too small",
 			input:       []byte{0x01, 0x00, 0x00},
-			wantPtype:   -1,
+			wantErr:     true,
+			wantPtype:   0,
 			wantDataLen: 0,
 			wantBufLen:  3,
 		},
@@ -288,7 +293,8 @@ func TestCarvePacket(t *testing.T) {
 			name: "valid query packet",
 			// Packet: size=6 (0x06, 0x00, 0x00), seq=0, type=3 (COM_QUERY), data="hello"
 			input:       []byte{0x06, 0x00, 0x00, 0x00, 0x03, 'h', 'e', 'l', 'l', 'o'},
-			wantPtype:   COM_QUERY,
+			wantErr:     false,
+			wantPtype:   CommandType(mysql.COM_QUERY),
 			wantDataLen: 5,
 			wantBufLen:  0, // buffer should be consumed
 		},
@@ -296,7 +302,8 @@ func TestCarvePacket(t *testing.T) {
 			name: "valid packet with remaining data",
 			// First packet + extra bytes
 			input:       []byte{0x04, 0x00, 0x00, 0x00, 0x03, 'f', 'o', 'o', 0xFF, 0xFF},
-			wantPtype:   COM_QUERY,
+			wantErr:     false,
+			wantPtype:   CommandType(mysql.COM_QUERY),
 			wantDataLen: 3,
 			wantBufLen:  2, // remaining bytes
 		},
@@ -307,16 +314,23 @@ func TestCarvePacket(t *testing.T) {
 			buf := make([]byte, len(tt.input))
 			copy(buf, tt.input)
 
-			ptype, data := carvePacket(&buf)
+			ptype, data, err := carvePacket(&buf)
 
-			if ptype != tt.wantPtype {
-				t.Errorf("carvePacket() ptype = %d, want %d", ptype, tt.wantPtype)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("carvePacket() error = %v, wantErr %v", err, tt.wantErr)
+				return
 			}
-			if len(data) != tt.wantDataLen {
-				t.Errorf("carvePacket() data length = %d, want %d", len(data), tt.wantDataLen)
-			}
-			if len(buf) != tt.wantBufLen {
-				t.Errorf("carvePacket() remaining buffer length = %d, want %d", len(buf), tt.wantBufLen)
+
+			if !tt.wantErr {
+				if ptype != tt.wantPtype {
+					t.Errorf("carvePacket() ptype = %v (%s), want %v (%s)", ptype, ptype.String(), tt.wantPtype, tt.wantPtype.String())
+				}
+				if len(data) != tt.wantDataLen {
+					t.Errorf("carvePacket() data length = %d, want %d", len(data), tt.wantDataLen)
+				}
+				if len(buf) != tt.wantBufLen {
+					t.Errorf("carvePacket() remaining buffer length = %d, want %d", len(buf), tt.wantBufLen)
+				}
 			}
 		})
 	}

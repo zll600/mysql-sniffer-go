@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	mysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -34,9 +36,6 @@ const (
 	COLOR_WHITE   = "\x1b[37m"
 	COLOR_DEFAULT = "\x1b[39m"
 
-	// MySQL packet types
-	COM_QUERY = 3
-
 	// These are used for formatting outputs
 	F_NONE = iota
 	F_QUERY
@@ -44,6 +43,87 @@ const (
 	F_SOURCE
 	F_SOURCEIP
 )
+
+// CommandType represents a MySQL protocol command type
+type CommandType byte
+
+// String returns the human-readable name of the command type
+func (c CommandType) String() string {
+	switch byte(c) {
+	case mysql.COM_SLEEP:
+		return "COM_SLEEP"
+	case mysql.COM_QUIT:
+		return "COM_QUIT"
+	case mysql.COM_INIT_DB:
+		return "COM_INIT_DB"
+	case mysql.COM_QUERY:
+		return "COM_QUERY"
+	case mysql.COM_FIELD_LIST:
+		return "COM_FIELD_LIST"
+	case mysql.COM_CREATE_DB:
+		return "COM_CREATE_DB"
+	case mysql.COM_DROP_DB:
+		return "COM_DROP_DB"
+	case mysql.COM_REFRESH:
+		return "COM_REFRESH"
+	case mysql.COM_SHUTDOWN:
+		return "COM_SHUTDOWN"
+	case mysql.COM_STATISTICS:
+		return "COM_STATISTICS"
+	case mysql.COM_PROCESS_INFO:
+		return "COM_PROCESS_INFO"
+	case mysql.COM_CONNECT:
+		return "COM_CONNECT"
+	case mysql.COM_PROCESS_KILL:
+		return "COM_PROCESS_KILL"
+	case mysql.COM_DEBUG:
+		return "COM_DEBUG"
+	case mysql.COM_PING:
+		return "COM_PING"
+	case mysql.COM_TIME:
+		return "COM_TIME"
+	case mysql.COM_DELAYED_INSERT:
+		return "COM_DELAYED_INSERT"
+	case mysql.COM_CHANGE_USER:
+		return "COM_CHANGE_USER"
+	case mysql.COM_BINLOG_DUMP:
+		return "COM_BINLOG_DUMP"
+	case mysql.COM_TABLE_DUMP:
+		return "COM_TABLE_DUMP"
+	case mysql.COM_CONNECT_OUT:
+		return "COM_CONNECT_OUT"
+	case mysql.COM_REGISTER_SLAVE:
+		return "COM_REGISTER_SLAVE"
+	case mysql.COM_STMT_PREPARE:
+		return "COM_STMT_PREPARE"
+	case mysql.COM_STMT_EXECUTE:
+		return "COM_STMT_EXECUTE"
+	case mysql.COM_STMT_SEND_LONG_DATA:
+		return "COM_STMT_SEND_LONG_DATA"
+	case mysql.COM_STMT_CLOSE:
+		return "COM_STMT_CLOSE"
+	case mysql.COM_STMT_RESET:
+		return "COM_STMT_RESET"
+	case mysql.COM_SET_OPTION:
+		return "COM_SET_OPTION"
+	case mysql.COM_STMT_FETCH:
+		return "COM_STMT_FETCH"
+	case mysql.COM_DAEMON:
+		return "COM_DAEMON"
+	case mysql.COM_BINLOG_DUMP_GTID:
+		return "COM_BINLOG_DUMP_GTID"
+	case mysql.COM_RESET_CONNECTION:
+		return "COM_RESET_CONNECTION"
+	default:
+		return fmt.Sprintf("UNKNOWN_COMMAND_%d", c)
+	}
+}
+
+// IsProcessable returns true if this command type can be processed by the sniffer
+func (c CommandType) IsProcessable() bool {
+	// Currently only COM_QUERY is processable
+	return c == CommandType(mysql.COM_QUERY)
+}
 
 type packet struct {
 	request bool // request or response
@@ -248,20 +328,21 @@ func processRequest(rs *source, data []byte) {
 	}
 
 	rs.reqBuffer = data
-	pType, pData := carvePacket(&rs.reqBuffer)
+	pType, pData, err := carvePacket(&rs.reqBuffer)
+
+	// Handle packet parsing errors (incomplete or malformed packets)
+	if err != nil {
+		slog.Debug("failed to parse packet", "error", err)
+		return
+	}
 
 	// The synchronization logic: if we're not synced, we wait for a COM_QUERY
 	if !rs.synced {
-		if pType != COM_QUERY {
+		if pType != CommandType(mysql.COM_QUERY) {
 			rs.reqBuffer, rs.respBuffer = nil, nil
 			return
 		}
 		rs.synced = true
-	}
-
-	// No (full) packet detected yet
-	if pType == -1 {
-		return
 	}
 
 	// Record request timestamp
@@ -463,39 +544,42 @@ func handleStatusUpdate(displaycount int, sortby string, cutoff int) {
 }
 
 // carvePacket tries to pull a packet out of a slice of bytes. If so, it removes
-// those bytes from the slice.
-func carvePacket(buf *[]byte) (int, []byte) {
+// those bytes from the slice. Returns the command type, data payload, and any error.
+func carvePacket(buf *[]byte) (CommandType, []byte, error) {
 	dataLen := uint32(len(*buf))
-	// TODO: 5 is a magical number here
+	// MySQL packet minimum size: 4 bytes header + 1 byte command type
 	if dataLen < 5 {
-		return -1, nil
+		return 0, nil, errors.New("buffer too small for MySQL packet header")
 	}
 
-	// TODO: figure out the parse here, maybe we need a mysql protocol format here
-	// first three bytes
+	// Parse MySQL packet header
+	// First three bytes: payload length (little-endian)
+	// Fourth byte: sequence number
+	// Fifth byte onwards: payload (command type + data)
 	size := uint32((*buf)[0]) + uint32((*buf)[1])<<8 + uint32((*buf)[2])<<16
-	// TODO: maybe should be dataLen != size+4
-	// three bytes: size of command
-	// one byte: the command type
+
+	// Validate packet completeness
+	// size = payload length (includes command type byte)
+	// total packet = 4 bytes header + size bytes payload
 	if size == 0 || dataLen < size+4 {
-		return -1, nil
+		return 0, nil, errors.New("incomplete MySQL packet")
 	}
 
-	// Else, has some length, try to validate it.
+	// Extract command type and data payload
 	end := size + 4
-	pType := int((*buf)[4])
+	pType := CommandType((*buf)[4])
 	data := (*buf)[5 : size+4]
+
+	// Update buffer to remove processed packet
 	if end >= dataLen {
 		*buf = nil
 	} else {
 		*buf = (*buf)[end:]
 	}
 
-	//	log.Printf("datalen=%d size=%d end=%d ptype=%d data=%d buf=%d",
-	//		datalen, size, end, ptype, len(data), len(*buf))
-	slog.Info("carved Packet", "dataLen", dataLen, "size", size, "end", end, "pType", pType, "data", data, "buf", buf)
+	slog.Info("carved Packet", "dataLen", dataLen, "size", size, "end", end, "pType", pType.String(), "dataLen", len(data), "bufRemaining", len(*buf))
 
-	return pType, data
+	return pType, data, nil
 }
 
 // scans forward in the query given the current type and returns when we encounter
